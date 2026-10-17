@@ -150,8 +150,9 @@ jobs:
           echo "Initiating remote deployment on EC2 Instance: ${INSTANCE_ID}"
           echo "Deploying Candidate Image: ${IMAGE_URI}"
 
-          # Construct deployment execution command
-          DEPLOY_CMD="export AWS_REGION='${AWS_REGION}'; export SIMULATE_FAILURE='${SIMULATE_FAILURE}'; /opt/aws-cicd-demo/deploy.sh '${IMAGE_URI}'"
+          # Construct deployment execution command (syncs scripts and runs candidate deployment)
+          SYNC_SCRIPTS="mkdir -p /opt/aws-cicd-demo && curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/deploy.sh -o /opt/aws-cicd-demo/deploy.sh && curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/rollback.sh -o /opt/aws-cicd-demo/rollback.sh && curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/verify-deployment.sh -o /opt/aws-cicd-demo/verify-deployment.sh && chmod +x /opt/aws-cicd-demo/*.sh"
+          DEPLOY_CMD="${SYNC_SCRIPTS} && export AWS_REGION='${AWS_REGION}'; export SIMULATE_FAILURE='${SIMULATE_FAILURE}'; /opt/aws-cicd-demo/deploy.sh '${IMAGE_URI}'"
 
           # Send Command via AWS Systems Manager
           COMMAND_ID=$(aws ssm send-command \
