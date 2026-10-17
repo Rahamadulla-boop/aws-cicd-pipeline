@@ -1,0 +1,32 @@
+{
+  "name": "aws-cicd-demo",
+  "version": "1.0.0",
+  "description": "Production-grade Automated CI/CD Pipeline with AWS Deployment, Docker Containerization, Automated Rollback, and CloudWatch Monitoring",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test tests/*.test.js",
+    "lint": "node scripts/lint.js",
+    "scan:secrets": "node scripts/scan-secrets.js"
+  },
+  "keywords": [
+    "aws",
+    "cicd",
+    "github-actions",
+    "docker",
+    "ecr",
+    "ec2",
+    "cloudwatch",
+    "rollback"
+  ],
+  "author": "DevOps Engineering Team",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

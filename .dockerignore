@@ -1,0 +1,27 @@
+# Git
+.git
+.gitignore
+
+# Dependencies
+node_modules
+npm-debug.log*
+
+# Environment and secrets
+.env*
+*.pem
+*.key
+
+# Tests and development documentation
+tests
+docs
+infrastructure
+monitoring
+scripts
+.github
+*.md
+coverage
+.nyc_output
+
+# Docker files
+Dockerfile
+.dockerignore

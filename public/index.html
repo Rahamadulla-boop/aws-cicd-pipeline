@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>aws-cicd-demo | DevOps Status Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🚀</text></svg>">
+</head>
+<body>
+  <div class="app-container">
+    <header class="header">
+      <div class="header-brand">
+        <div class="logo-icon">🚀</div>
+        <div>
+          <h1>aws-cicd-demo</h1>
+          <p class="subtitle">Automated AWS CI/CD Pipeline Dashboard</p>
+        </div>
+      </div>
+      <div class="header-badges">
+        <span id="env-badge" class="badge badge-env">Loading...</span>
+        <span id="version-badge" class="badge badge-version">v...</span>
+        <div id="health-indicator" class="status-pill status-checking">
+          <span class="pulsing-dot"></span>
+          <span id="health-text">Checking health...</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="dashboard-grid">
+      <!-- Section: System Overview -->
+      <section class="card overview-card">
+        <h2>Deployment &amp; Runtime Overview</h2>
+        <div class="metrics-grid">
+          <div class="metric-item">
+            <span class="metric-label">Application Version</span>
+            <span class="metric-value" id="val-version">-</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Environment</span>
+            <span class="metric-value" id="val-env">-</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Git Commit SHA</span>
+            <span class="metric-value font-mono" id="val-commit">-</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Uptime</span>
+            <span class="metric-value" id="val-uptime">-</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Build Timestamp</span>
+            <span class="metric-value" id="val-build-time">-</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Deployment Timestamp</span>
+            <span class="metric-value" id="val-deploy-time">-</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Section: CI/CD Pipeline & Architecture Architecture -->
+      <section class="card pipeline-card">
+        <h2>Pipeline &amp; Cloud Infrastructure Architecture</h2>
+        <div class="pipeline-flow">
+          <div class="step-card step-done">
+            <div class="step-icon">🐙</div>
+            <div class="step-title">GitHub Actions</div>
+            <div class="step-detail">Automated CI tests &amp; security linting</div>
+          </div>
+          <div class="flow-arrow">→</div>
+          <div class="step-card step-done">
+            <div class="step-icon">🔒</div>
+            <div class="step-title">AWS IAM OIDC</div>
+            <div class="step-detail">Keyless federated temporary auth</div>
+          </div>
+          <div class="flow-arrow">→</div>
+          <div class="step-card step-done">
+            <div class="step-icon">📦</div>
+            <div class="step-title">Amazon ECR</div>
+            <div class="step-detail">Immutable SHA-tagged container registry</div>
+          </div>
+          <div class="flow-arrow">→</div>
+          <div class="step-card step-done">
+            <div class="step-icon">⚡</div>
+            <div class="step-title">Amazon EC2</div>
+            <div class="step-detail">Candidate validation &amp; zero-downtime switch</div>
+          </div>
+          <div class="flow-arrow">→</div>
+          <div class="step-card step-done">
+            <div class="step-icon">🛡️</div>
+            <div class="step-title">Auto Rollback</div>
+            <div class="step-detail">Healthcheck verification &amp; instant recovery</div>
+          </div>
+          <div class="flow-arrow">→</div>
+          <div class="step-card step-done">
+            <div class="step-icon">📊</div>
+            <div class="step-title">CloudWatch</div>
+            <div class="step-detail">JSON structured logs &amp; system alarms</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Section: Interactive Endpoint Inspector -->
+      <section class="card endpoints-card">
+        <h2>Live API Endpoint Verification</h2>
+        <p class="section-desc">Test the core application endpoints used by health probes, automated rollback scripts, and monitoring agents.</p>
+        
+        <div class="button-group">
+          <button class="btn btn-primary" onclick="testEndpoint('/api/health')">GET /api/health</button>
+          <button class="btn btn-secondary" onclick="testEndpoint('/api/info')">GET /api/info</button>
+          <button class="btn btn-secondary" onclick="testEndpoint('/api/ready')">GET /api/ready</button>
+        </div>
+
+        <div class="response-viewer">
+          <div class="response-header">
+            <span id="response-endpoint">Select an endpoint above to inspect response</span>
+            <span id="response-status" class="status-code"></span>
+          </div>
+          <pre><code id="response-body">// Output will appear here...</code></pre>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>Automated CI/CD Pipeline with AWS Deployment &bull; Production Architecture &bull; Region: ap-south-1 (Mumbai)</p>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

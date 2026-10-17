@@ -1,0 +1,67 @@
+{
+  "agent": {
+    "metrics_collection_interval": 60,
+    "run_as_user": "root"
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/opt/aws-cicd-demo/deployment-events.log",
+            "log_group_name": "/aws/ec2/aws-cicd-demo",
+            "log_stream_name": "{instance_id}/deployment-events",
+            "timestamp_format": "%Y-%m-%dT%H:%M:%SZ",
+            "timezone": "UTC"
+          },
+          {
+            "file_path": "/var/log/syslog",
+            "log_group_name": "/aws/ec2/aws-cicd-demo",
+            "log_stream_name": "{instance_id}/syslog"
+          },
+          {
+            "file_path": "/var/log/aws-cicd-demo/failed-candidates/*.log",
+            "log_group_name": "/aws/ec2/aws-cicd-demo",
+            "log_stream_name": "{instance_id}/failed-candidates",
+            "timezone": "UTC"
+          }
+        ]
+      }
+    }
+  },
+  "metrics": {
+    "append_dimensions": {
+      "InstanceId": "${aws:InstanceId}",
+      "AutoScalingGroupName": "${aws:AutoScalingGroupName}"
+    },
+    "metrics_collected": {
+      "cpu": {
+        "measurement": [
+          "cpu_usage_idle",
+          "cpu_usage_user",
+          "cpu_usage_system"
+        ],
+        "metrics_collection_interval": 60,
+        "totalcpu": true
+      },
+      "mem": {
+        "measurement": [
+          "mem_used_percent",
+          "mem_available",
+          "mem_total"
+        ],
+        "metrics_collection_interval": 60
+      },
+      "disk": {
+        "measurement": [
+          "used_percent",
+          "free"
+        ],
+        "metrics_collection_interval": 60,
+        "resources": [
+          "/"
+        ]
+      }
+    }
+  }
+}

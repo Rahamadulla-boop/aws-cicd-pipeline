@@ -1,0 +1,85 @@
+name: Infrastructure Maintenance & Cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Cleanup Action to perform'
+        required: true
+        type: choice
+        default: 'prune_old_ecr_images'
+        options:
+          - 'prune_old_ecr_images'
+          - 'teardown_all_infrastructure'
+      confirm_teardown:
+        description: 'Type "CONFIRM_DESTROY" if choosing teardown_all_infrastructure'
+        required: false
+        default: ''
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  cleanup:
+    name: Execute Maintenance / Teardown
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-session-name: GitHubActions-Cleanup
+          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+
+      - name: Prune Untagged & Stale ECR Images
+        if: github.event.inputs.action == 'prune_old_ecr_images'
+        run: |
+          REPO_NAME="${{ vars.ECR_REPOSITORY_NAME || 'aws-cicd-demo' }}"
+          REGION="${{ vars.AWS_REGION || 'ap-south-1' }}"
+          echo "Pruning untagged images in ECR repository: ${REPO_NAME}..."
+          
+          UNTAGGED_DIGESTS=$(aws ecr list-images \
+            --repository-name "${REPO_NAME}" \
+            --filter "tagStatus=UNTAGGED" \
+            --region "${REGION}" \
+            --query "imageIds[*].imageDigest" \
+            --output text)
+            
+          if [ -n "${UNTAGGED_DIGESTS}" ] && [ "${UNTAGGED_DIGESTS}" != "None" ]; then
+            for digest in ${UNTAGGED_DIGESTS}; do
+              echo "Deleting untagged image digest: ${digest}"
+              aws ecr batch-delete-image \
+                --repository-name "${REPO_NAME}" \
+                --image-ids imageDigest="${digest}" \
+                --region "${REGION}"
+            done
+            echo "Pruning completed successfully."
+          else
+            echo "No untagged images found."
+          fi
+
+      - name: Teardown All AWS Infrastructure (CloudFormation & ECR)
+        if: github.event.inputs.action == 'teardown_all_infrastructure'
+        run: |
+          if [ "${{ github.event.inputs.confirm_teardown }}" != "CONFIRM_DESTROY" ]; then
+            echo "::error::Confirmation phrase does not match 'CONFIRM_DESTROY'. Aborting teardown."
+            exit 1
+          fi
+
+          STACK_NAME="${{ vars.CFN_STACK_NAME || 'aws-cicd-pipeline-stack' }}"
+          REPO_NAME="${{ vars.ECR_REPOSITORY_NAME || 'aws-cicd-demo' }}"
+          REGION="${{ vars.AWS_REGION || 'ap-south-1' }}"
+
+          echo "Deleting ECR Repository: ${REPO_NAME}..."
+          aws ecr delete-repository --repository-name "${REPO_NAME}" --force --region "${REGION}" || true
+
+          echo "Deleting CloudFormation Stack: ${STACK_NAME}..."
+          aws cloudformation delete-stack --stack-name "${STACK_NAME}" --region "${REGION}"
+
+          echo "Waiting for stack deletion..."
+          aws cloudformation wait stack-delete-complete --stack-name "${STACK_NAME}" --region "${REGION}" || true
+          echo "Teardown complete."

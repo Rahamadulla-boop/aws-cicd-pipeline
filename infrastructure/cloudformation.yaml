@@ -1,0 +1,390 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Production CI/CD Pipeline Infrastructure for aws-cicd-demo:
+  Amazon ECR Repository with lifecycle rules, Ubuntu EC2 Instance with SSM,
+  Least-Privilege Security Groups, CloudWatch Log Groups, and GitHub OIDC Role.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: production
+    Description: Deployment target environment name (e.g. production, staging)
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t2.micro
+    Description: EC2 instance type (Free Tier compatible)
+
+  GitHubOrg:
+    Type: String
+    Default: your-github-username
+    Description: GitHub organization or username owning the repository
+
+  GitHubRepo:
+    Type: String
+    Default: aws-cicd-pipeline
+    Description: GitHub repository name
+
+  UbuntuAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+    Description: Ubuntu 24.04 LTS official Canonical AMI ID resolved via SSM Parameter Store
+
+Resources:
+  # ============================================================================
+  # 1. Amazon ECR Private Container Registry
+  # ============================================================================
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: aws-cicd-demo
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Retain only the 10 most recent tagged releases to control storage cost",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Expire untagged images older than 3 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 3
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: aws-cicd-demo
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ============================================================================
+  # 2. Amazon CloudWatch Log Group
+  # ============================================================================
+  CloudWatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/ec2/aws-cicd-demo
+      RetentionInDays: 14
+      Tags:
+        - Key: Project
+          Value: aws-cicd-demo
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ============================================================================
+  # 3. Security Group (Least-Privilege: No 0.0.0.0/0 SSH, uses AWS SSM)
+  # ============================================================================
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for aws-cicd-demo host (Port 80/3000 Web, Egress only)
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Public HTTP web traffic
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 0.0.0.0/0
+          Description: Direct Node.js application traffic
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic for Docker pulls, packages, and CloudWatch metrics
+      Tags:
+        - Key: Project
+          Value: aws-cicd-demo
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ============================================================================
+  # 4. EC2 IAM Role & Instance Profile
+  # ============================================================================
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aws-cicd-demo-ec2-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: ECRPullAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: !GetAtt ECRRepository.Arn
+        - PolicyName: CloudWatchAppLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/ec2/aws-cicd-demo*'
+      Tags:
+        - Key: Project
+          Value: aws-cicd-demo
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: aws-cicd-demo-ec2-instance-profile
+      Roles:
+        - !Ref EC2InstanceRole
+
+  # ============================================================================
+  # 5. Amazon EC2 Host Instance
+  # ============================================================================
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref UbuntuAmiId
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            DeleteOnTermination: true
+            Encrypted: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+
+          # Update and install Docker Engine & dependencies
+          apt-get update -y
+          apt-get install -y ca-certificates curl gnupg lsb-release unzip jq iptables
+
+          # Install Docker official CE
+          install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+          chmod a+r /etc/apt/keyrings/docker.asc
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+          apt-get update -y
+          apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin
+
+          systemctl enable --now docker
+          usermod -aG docker ubuntu
+
+          # Install AWS CLI v2
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip -q awscliv2.zip
+          ./aws/install
+          rm -rf aws awscliv2.zip
+
+          # Install Amazon CloudWatch Agent
+          curl -O https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+          dpkg -i -E ./amazon-cloudwatch-agent.deb
+          rm amazon-cloudwatch-agent.deb
+
+          # Prepare application directory & deployment logging
+          mkdir -p /opt/aws-cicd-demo /var/log/aws-cicd-demo/failed-candidates
+          chown -R ubuntu:ubuntu /opt/aws-cicd-demo /var/log/aws-cicd-demo
+          touch /opt/aws-cicd-demo/deployment-events.log
+          chmod 664 /opt/aws-cicd-demo/deployment-events.log
+
+          # Configure Port 80 -> Port 3000 redirection via iptables
+          iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 3000
+          apt-get install -y iptables-persistent
+          netfilter-persistent save
+
+          # Configure CloudWatch Agent
+          cat << 'EOF' > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+          {
+            "agent": {
+              "metrics_collection_interval": 60,
+              "run_as_user": "root"
+            },
+            "logs": {
+              "logs_collected": {
+                "files": {
+                  "collect_list": [
+                    {
+                      "file_path": "/opt/aws-cicd-demo/deployment-events.log",
+                      "log_group_name": "/aws/ec2/aws-cicd-demo",
+                      "log_stream_name": "{instance_id}/deployment-events",
+                      "timestamp_format": "%Y-%m-%dT%H:%M:%SZ"
+                    },
+                    {
+                      "file_path": "/var/log/syslog",
+                      "log_group_name": "/aws/ec2/aws-cicd-demo",
+                      "log_stream_name": "{instance_id}/system-syslog"
+                    }
+                  ]
+                }
+              }
+            },
+            "metrics": {
+              "metrics_collected": {
+                "mem": {
+                  "measurement": ["mem_used_percent"]
+                },
+                "disk": {
+                  "measurement": ["used_percent"],
+                  "resources": ["/"]
+                }
+              }
+            }
+          }
+          EOF
+
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+            -a fetch-config \
+            -m ec2 \
+            -s \
+            -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
+          echo "[SUCCESS] EC2 Host initialization complete."
+      Tags:
+        - Key: Name
+          Value: aws-cicd-demo-host
+        - Key: Project
+          Value: aws-cicd-demo
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ============================================================================
+  # 6. GitHub Actions OIDC IAM Role (Keyless AWS Authentication)
+  # ============================================================================
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aws-cicd-demo-github-oidc-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrg}/${GitHubRepo}:*'
+      Policies:
+        - PolicyName: GitHubActionsDeploymentPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ECRAuth
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: ECRPush
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:GetRepositoryPolicy
+                  - ecr:DescribeRepositories
+                  - ecr:ListImages
+                  - ecr:DescribeImages
+                  - ecr:BatchGetImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                Resource: !GetAtt ECRRepository.Arn
+              - Sid: SSMDeployAccess
+                Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommands
+                  - ssm:ListCommandInvocations
+                Resource:
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${EC2Instance}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:*:document/AWS-RunShellScript'
+              - Sid: EC2Discovery
+                Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                Resource: '*'
+      Tags:
+        - Key: Project
+          Value: aws-cicd-demo
+
+Outputs:
+  ECRRepositoryUri:
+    Description: Amazon ECR Private Repository URI
+    Value: !GetAtt ECRRepository.RepositoryUri
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRUri'
+
+  EC2InstanceId:
+    Description: Amazon EC2 Instance ID
+    Value: !Ref EC2Instance
+    Export:
+      Name: !Sub '${AWS::StackName}-InstanceId'
+
+  EC2PublicIP:
+    Description: Public IPv4 Address of the EC2 Instance
+    Value: !GetAtt EC2Instance.PublicIp
+
+  ApplicationURL:
+    Description: Public HTTP URL for aws-cicd-demo dashboard
+    Value: !Sub 'http://${EC2Instance.PublicIp}'
+
+  GitHubActionsRoleArn:
+    Description: IAM Role ARN to configure in GitHub Secrets (AWS_ROLE_TO_ASSUME)
+    Value: !GetAtt GitHubActionsRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-GitHubRoleArn'
+
+  CloudWatchLogGroupName:
+    Description: Amazon CloudWatch Log Group for application and system logs
+    Value: !Ref CloudWatchLogGroup

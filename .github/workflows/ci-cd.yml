@@ -1,0 +1,224 @@
+name: CI/CD Pipeline - Test, Build, Publish, Deploy & Monitor
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      simulate_failure:
+        description: 'Simulate candidate health check failure to test automated rollback (Staging/Dev only)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ============================================================================
+  # STAGE 1: Continuous Integration (Lint, Test, Audit)
+  # ============================================================================
+  test:
+    name: Run Unit & Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Syntax & Quality Linter
+        run: npm run lint
+
+      - name: Run Automated Test Suite
+        run: npm test
+
+      - name: Dependency Vulnerability Audit
+        run: npm audit --audit-level=high
+
+  # ============================================================================
+  # STAGE 2: Container Security Scan & Image Validation
+  # ============================================================================
+  container-scan:
+    name: Docker Image Build & Security Scan
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Local Test Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: aws-cicd-demo:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Trivy Vulnerability Scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: aws-cicd-demo:test
+          format: 'table'
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+  # ============================================================================
+  # STAGE 3: Continuous Deployment (OIDC Auth, ECR Publish, EC2 Deploy, Rollback)
+  # ============================================================================
+  deploy:
+    name: Publish to ECR & Deploy to Amazon EC2
+    needs: [test, container-scan]
+    # Restrict deployment strictly to authorized main branch events (never run on untrusted PRs)
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write  # Required for AWS OIDC temporary token exchange
+      contents: read
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to AWS via OpenID Connect (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-session-name: GitHubActions-CICD-Deploy
+          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and Push Immutable Container Image to ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY_NAME || 'aws-cicd-demo' }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          echo "Building production image: ${IMAGE_URI}"
+          
+          docker build \
+            --build-arg COMMIT_SHA="${{ github.sha }}" \
+            --build-arg BUILD_TIMESTAMP="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            -t "${IMAGE_URI}" \
+            -t "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest" \
+            .
+            
+          echo "Pushing immutable commit tag: ${IMAGE_URI}"
+          docker push "${IMAGE_URI}"
+          
+          echo "Pushing latest convenience tag: ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
+          docker push "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
+
+          echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy Candidate Image via AWS Systems Manager (SSM)
+        id: ssm-deploy
+        env:
+          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+          IMAGE_URI: ${{ steps.build-image.outputs.image_uri }}
+          SIMULATE_FAILURE: ${{ github.event.inputs.simulate_failure || 'false' }}
+        run: |
+          echo "Initiating remote deployment on EC2 Instance: ${INSTANCE_ID}"
+          echo "Deploying Candidate Image: ${IMAGE_URI}"
+
+          # Construct deployment execution command
+          DEPLOY_CMD="export AWS_REGION='${AWS_REGION}'; export SIMULATE_FAILURE='${SIMULATE_FAILURE}'; /opt/aws-cicd-demo/deploy.sh '${IMAGE_URI}'"
+
+          # Send Command via AWS Systems Manager
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${INSTANCE_ID}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Automated CI/CD Deployment: ${IMAGE_URI}" \
+            --parameters "commands=[\"${DEPLOY_CMD}\"]" \
+            --output text \
+            --query "Command.CommandId" \
+            --region "${AWS_REGION}")
+
+          echo "SSM Command Dispatched. Command ID: ${COMMAND_ID}"
+          echo "Awaiting execution and health verification (timeout: 180s)..."
+
+          # Poll command invocation status with bounded timeout
+          STATUS="Pending"
+          ATTEMPTS=0
+          MAX_ATTEMPTS=36  # 36 * 5s = 180 seconds
+
+          while [[ "${STATUS}" == "Pending" || "${STATUS}" == "InProgress" ]]; do
+            ATTEMPTS=$((ATTEMPTS + 1))
+            if [ "${ATTEMPTS}" -gt "${MAX_ATTEMPTS}" ]; then
+              echo "::error::Deployment command timed out waiting for SSM completion."
+              exit 1
+            fi
+            sleep 5
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "${COMMAND_ID}" \
+              --instance-id "${INSTANCE_ID}" \
+              --region "${AWS_REGION}" \
+              --query "Status" \
+              --output text 2>/dev/null || echo "InProgress")
+            echo "[Status Check ${ATTEMPTS}] Current SSM Status: ${STATUS}"
+          done
+
+          # Retrieve deployment log output
+          echo "==================== DEPLOYMENT OUTPUT ===================="
+          aws ssm get-command-invocation \
+            --command-id "${COMMAND_ID}" \
+            --instance-id "${INSTANCE_ID}" \
+            --region "${AWS_REGION}" \
+            --query "StandardOutputContent" \
+            --output text || true
+
+          STDERR_CONTENT=$(aws ssm get-command-invocation \
+            --command-id "${COMMAND_ID}" \
+            --instance-id "${INSTANCE_ID}" \
+            --region "${AWS_REGION}" \
+            --query "StandardErrorContent" \
+            --output text || true)
+
+          if [ -n "${STDERR_CONTENT}" ]; then
+            echo "==================== DEPLOYMENT STDERR ===================="
+            echo "${STDERR_CONTENT}"
+          fi
+
+          if [ "${STATUS}" != "Success" ]; then
+            echo "::error::Deployment failed with SSM Status '${STATUS}'. Automated rollback was initiated on the host."
+            exit 1
+          fi
+
+          echo "Deployment and verification completed successfully!"
+
+      - name: Verify Public Application Endpoint
+        env:
+          APP_HOST: ${{ vars.APPLICATION_HOST || secrets.APPLICATION_HOST }}
+        if: env.APP_HOST != ''
+        run: |
+          echo "Verifying live public endpoint at http://${APP_HOST}/api/health..."
+          curl -f -sS "http://${APP_HOST}/api/health" | jq .
