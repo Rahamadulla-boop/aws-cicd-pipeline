@@ -13,7 +13,7 @@
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
         },
         "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:<GITHUB_USERNAME>/<GITHUB_REPOSITORY>:ref:refs/heads/*"
+          "token.actions.githubusercontent.com:sub": "repo:Rahamadulla-boop/aws-cicd-pipeline:ref:refs/heads/*"
         }
       }
     }

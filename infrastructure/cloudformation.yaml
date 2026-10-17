@@ -21,7 +21,7 @@ Parameters:
 
   GitHubOrg:
     Type: String
-    Default: your-github-username
+    Default: Rahamadulla-boop
     Description: GitHub organization or username owning the repository
 
   GitHubRepo:
