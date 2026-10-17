@@ -172,7 +172,22 @@ jobs:
           IMAGE_URI: ${{ steps.build-image.outputs.image_uri }}
           SIMULATE_FAILURE: ${{ github.event.inputs.simulate_failure || 'false' }}
         run: |
-          echo "Initiating remote deployment on EC2 Instance: ${INSTANCE_ID}"
+          TARGET_INSTANCE="${INSTANCE_ID}"
+          if [ -z "${TARGET_INSTANCE}" ]; then
+            echo "INSTANCE_ID secret was empty; auto-discovering running EC2 instance tagged Project=aws-cicd-demo..."
+            TARGET_INSTANCE=$(aws ec2 describe-instances \
+              --filters "Name=tag:Project,Values=aws-cicd-demo" "Name=instance-state-name,Values=running" \
+              --query "Reservations[0].Instances[0].InstanceId" \
+              --output text \
+              --region "${AWS_REGION}")
+          fi
+
+          if [ -z "${TARGET_INSTANCE}" ] || [ "${TARGET_INSTANCE}" == "None" ]; then
+            echo "::error::No running EC2 instance found with tag Project=aws-cicd-demo. Please check EC2 console or set EC2_INSTANCE_ID secret."
+            exit 1
+          fi
+
+          echo "Target EC2 Instance: ${TARGET_INSTANCE}"
           echo "Deploying Candidate Image: ${IMAGE_URI}"
 
           # Construct deployment execution command (syncs scripts and runs candidate deployment)
@@ -181,9 +196,9 @@ jobs:
 
           # Send Command via AWS Systems Manager
           COMMAND_ID=$(aws ssm send-command \
-            --instance-ids "${INSTANCE_ID}" \
+            --instance-ids "${TARGET_INSTANCE}" \
             --document-name "AWS-RunShellScript" \
-            --comment "Automated CI/CD Deployment: ${IMAGE_URI}" \
+            --comment "CI/CD Deploy: ${{ github.sha }}" \
             --parameters "commands=[\"${DEPLOY_CMD}\"]" \
             --output text \
             --query "Command.CommandId" \
@@ -206,7 +221,7 @@ jobs:
             sleep 5
             STATUS=$(aws ssm get-command-invocation \
               --command-id "${COMMAND_ID}" \
-              --instance-id "${INSTANCE_ID}" \
+              --instance-id "${TARGET_INSTANCE}" \
               --region "${AWS_REGION}" \
               --query "Status" \
               --output text 2>/dev/null || echo "InProgress")
@@ -217,14 +232,14 @@ jobs:
           echo "==================== DEPLOYMENT OUTPUT ===================="
           aws ssm get-command-invocation \
             --command-id "${COMMAND_ID}" \
-            --instance-id "${INSTANCE_ID}" \
+            --instance-id "${TARGET_INSTANCE}" \
             --region "${AWS_REGION}" \
             --query "StandardOutputContent" \
             --output text || true
 
           STDERR_CONTENT=$(aws ssm get-command-invocation \
             --command-id "${COMMAND_ID}" \
-            --instance-id "${INSTANCE_ID}" \
+            --instance-id "${TARGET_INSTANCE}" \
             --region "${AWS_REGION}" \
             --query "StandardErrorContent" \
             --output text || true)
