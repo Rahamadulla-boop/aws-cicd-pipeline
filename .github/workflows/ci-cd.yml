@@ -190,9 +190,8 @@ jobs:
           echo "Target EC2 Instance: ${TARGET_INSTANCE}"
           echo "Deploying Candidate Image: ${IMAGE_URI}"
 
-          # Construct deployment execution command (syncs scripts and runs candidate deployment)
-          SYNC_SCRIPTS="export PATH=\"/usr/local/bin:$PATH\"; which cloud-init >/dev/null 2>&1 && cloud-init status --wait || true; mkdir -p /opt/aws-cicd-demo && curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/deploy.sh -o /opt/aws-cicd-demo/deploy.sh && curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/rollback.sh -o /opt/aws-cicd-demo/rollback.sh && curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/verify-deployment.sh -o /opt/aws-cicd-demo/verify-deployment.sh && chmod +x /opt/aws-cicd-demo/*.sh"
-          DEPLOY_CMD="${SYNC_SCRIPTS} && export AWS_REGION='${AWS_REGION}'; export SIMULATE_FAILURE='${SIMULATE_FAILURE}'; /opt/aws-cicd-demo/deploy.sh '${IMAGE_URI}'"
+          # Single robust command to fetch and execute deployment engine
+          DEPLOY_CMD="curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/deploy.sh -o /tmp/deploy.sh && bash /tmp/deploy.sh '${IMAGE_URI}'"
 
           # Send Command via AWS Systems Manager
           COMMAND_ID=$(aws ssm send-command \

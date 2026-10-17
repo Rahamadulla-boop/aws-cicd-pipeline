@@ -7,7 +7,12 @@
 # ==============================================================================
 
 set -euo pipefail
-export PATH="/usr/local/bin:$PATH"
+export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+
+# Wait for system cloud-init to finish if recently launched
+if command -v cloud-init >/dev/null 2>&1; then
+  cloud-init status --wait || true
+fi
 
 IMAGE_URI="${1:-}"
 AWS_REGION="${AWS_REGION:-ap-south-1}"
@@ -21,7 +26,17 @@ STATE_FILE="${STATE_DIR}/last-known-good.env"
 CURRENT_FILE="${STATE_DIR}/current-release.env"
 EVENT_LOG="${STATE_DIR}/deployment-events.log"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Self-bootstrap helper scripts if not present
+mkdir -p "${STATE_DIR}"
+if [ ! -f "${STATE_DIR}/verify-deployment.sh" ]; then
+  curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/verify-deployment.sh -o "${STATE_DIR}/verify-deployment.sh" 2>/dev/null || true
+  chmod +x "${STATE_DIR}/verify-deployment.sh" 2>/dev/null || true
+fi
+if [ ! -f "${STATE_DIR}/rollback.sh" ]; then
+  curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/rollback.sh -o "${STATE_DIR}/rollback.sh" 2>/dev/null || true
+  chmod +x "${STATE_DIR}/rollback.sh" 2>/dev/null || true
+fi
+SCRIPT_DIR="${STATE_DIR}"
 
 echo "======================================================================"
 echo "[DEPLOY] [$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Starting deployment pipeline..."
