@@ -338,12 +338,16 @@ Resources:
                 Effect: Allow
                 Action:
                   - ssm:SendCommand
+                Resource:
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:*:document/AWS-RunShellScript'
+              - Sid: SSMInvocationStatus
+                Effect: Allow
+                Action:
                   - ssm:GetCommandInvocation
                   - ssm:ListCommands
                   - ssm:ListCommandInvocations
-                Resource:
-                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${EC2Instance}'
-                  - !Sub 'arn:aws:ssm:${AWS::Region}:*:document/AWS-RunShellScript'
+                Resource: '*'
               - Sid: EC2Discovery
                 Effect: Allow
                 Action:

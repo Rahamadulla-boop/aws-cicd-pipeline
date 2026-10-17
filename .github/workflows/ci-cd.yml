@@ -223,8 +223,13 @@ jobs:
               --instance-id "${TARGET_INSTANCE}" \
               --region "${AWS_REGION}" \
               --query "Status" \
-              --output text 2>/dev/null || echo "InProgress")
+              --output text 2>/dev/null || echo "Waiting")
+
             echo "[Status Check ${ATTEMPTS}/${MAX_ATTEMPTS}] Current SSM Status: ${STATUS}"
+
+            if [[ "${STATUS}" == "Success" || "${STATUS}" == "Failed" || "${STATUS}" == "Cancelled" || "${STATUS}" == "TimedOut" ]]; then
+              break
+            fi
           done
 
           # Retrieve deployment log output

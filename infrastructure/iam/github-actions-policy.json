@@ -31,15 +31,22 @@
       "Sid": "SSMDeployCommands",
       "Effect": "Allow",
       "Action": [
-        "ssm:SendCommand",
-        "ssm:GetCommandInvocation",
-        "ssm:ListCommands",
-        "ssm:ListCommandInvocations"
+        "ssm:SendCommand"
       ],
       "Resource": [
         "arn:aws:ec2:ap-south-1:<AWS_ACCOUNT_ID>:instance/*",
         "arn:aws:ssm:ap-south-1:*:document/AWS-RunShellScript"
       ]
+    },
+    {
+      "Sid": "SSMInvocationStatus",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommands",
+        "ssm:ListCommandInvocations"
+      ],
+      "Resource": "*"
     },
     {
       "Sid": "EC2Discovery",
