@@ -51,11 +51,12 @@ Resources:
             "rules": [
               {
                 "rulePriority": 1,
-                "description": "Retain only the 10 most recent tagged releases to control storage cost",
+                "description": "Expire untagged images older than 3 days",
                 "selection": {
-                  "tagStatus": "any",
-                  "countType": "imageCountMoreThan",
-                  "countNumber": 10
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 3
                 },
                 "action": {
                   "type": "expire"
@@ -63,12 +64,11 @@ Resources:
               },
               {
                 "rulePriority": 2,
-                "description": "Expire untagged images older than 3 days",
+                "description": "Retain only the 10 most recent releases to control storage cost",
                 "selection": {
-                  "tagStatus": "untagged",
-                  "countType": "sinceImagePushed",
-                  "countUnit": "days",
-                  "countNumber": 3
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
                 },
                 "action": {
                   "type": "expire"
