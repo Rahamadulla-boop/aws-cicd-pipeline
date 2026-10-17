@@ -102,7 +102,7 @@ Resources:
   EC2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Security group for aws-cicd-demo host (Port 80/3000 Web, Egress only)
+      GroupDescription: Security group for aws-cicd-demo host (Port 80 and 3000)
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
@@ -114,10 +114,6 @@ Resources:
           ToPort: 3000
           CidrIp: 0.0.0.0/0
           Description: Direct Node.js application traffic
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
-          Description: Allow all outbound traffic for Docker pulls, packages, and CloudWatch metrics
       Tags:
         - Key: Project
           Value: aws-cicd-demo
