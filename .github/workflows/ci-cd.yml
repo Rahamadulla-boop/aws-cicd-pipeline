@@ -191,7 +191,7 @@ jobs:
           echo "Deploying Candidate Image: ${IMAGE_URI}"
 
           # Construct deployment execution command (syncs scripts and runs candidate deployment)
-          SYNC_SCRIPTS="mkdir -p /opt/aws-cicd-demo && curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/deploy.sh -o /opt/aws-cicd-demo/deploy.sh && curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/rollback.sh -o /opt/aws-cicd-demo/rollback.sh && curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/verify-deployment.sh -o /opt/aws-cicd-demo/verify-deployment.sh && chmod +x /opt/aws-cicd-demo/*.sh"
+          SYNC_SCRIPTS="export PATH=\"/usr/local/bin:$PATH\"; which cloud-init >/dev/null 2>&1 && cloud-init status --wait || true; mkdir -p /opt/aws-cicd-demo && curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/deploy.sh -o /opt/aws-cicd-demo/deploy.sh && curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/rollback.sh -o /opt/aws-cicd-demo/rollback.sh && curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/verify-deployment.sh -o /opt/aws-cicd-demo/verify-deployment.sh && chmod +x /opt/aws-cicd-demo/*.sh"
           DEPLOY_CMD="${SYNC_SCRIPTS} && export AWS_REGION='${AWS_REGION}'; export SIMULATE_FAILURE='${SIMULATE_FAILURE}'; /opt/aws-cicd-demo/deploy.sh '${IMAGE_URI}'"
 
           # Send Command via AWS Systems Manager
@@ -205,18 +205,18 @@ jobs:
             --region "${AWS_REGION}")
 
           echo "SSM Command Dispatched. Command ID: ${COMMAND_ID}"
-          echo "Awaiting execution and health verification (timeout: 180s)..."
+          echo "Awaiting execution and health verification (timeout: 360s)..."
 
           # Poll command invocation status with bounded timeout
           STATUS="Pending"
           ATTEMPTS=0
-          MAX_ATTEMPTS=36  # 36 * 5s = 180 seconds
+          MAX_ATTEMPTS=72  # 72 * 5s = 360 seconds
 
           while [[ "${STATUS}" == "Pending" || "${STATUS}" == "InProgress" ]]; do
             ATTEMPTS=$((ATTEMPTS + 1))
             if [ "${ATTEMPTS}" -gt "${MAX_ATTEMPTS}" ]; then
-              echo "::error::Deployment command timed out waiting for SSM completion."
-              exit 1
+              echo "::error::Deployment command reached max polling timeout (360s)."
+              break
             fi
             sleep 5
             STATUS=$(aws ssm get-command-invocation \
@@ -225,7 +225,7 @@ jobs:
               --region "${AWS_REGION}" \
               --query "Status" \
               --output text 2>/dev/null || echo "InProgress")
-            echo "[Status Check ${ATTEMPTS}] Current SSM Status: ${STATUS}"
+            echo "[Status Check ${ATTEMPTS}/${MAX_ATTEMPTS}] Current SSM Status: ${STATUS}"
           done
 
           # Retrieve deployment log output

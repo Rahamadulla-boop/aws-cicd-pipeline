@@ -7,6 +7,7 @@
 # ==============================================================================
 
 set -euo pipefail
+export PATH="/usr/local/bin:$PATH"
 
 IMAGE_URI="${1:-}"
 AWS_REGION="${AWS_REGION:-ap-south-1}"

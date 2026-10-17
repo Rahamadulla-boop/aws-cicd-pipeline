@@ -7,6 +7,7 @@
 # ==============================================================================
 
 set -euo pipefail
+export PATH="/usr/local/bin:$PATH"
 
 APP_NAME="aws-cicd-demo"
 STATE_DIR="/opt/aws-cicd-demo"
