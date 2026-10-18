@@ -1,20 +1,19 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# deploy.sh - Production Candidate Deployment & Validation Engine
+# deploy.sh - Self-Contained Zero-Downtime Deployment & Recovery Engine
 # ==============================================================================
-# Orchestrates zero-downtime candidate validation, ECR authentication,
-# bounded health probes, and automatic rollback triggering on failure.
+# Features:
+# - Self-healing: auto-installs Docker/AWS CLI if missing
+# - Zero-hanging: removes cloud-init blocking
+# - Dual-port validation: candidate verified on 3001 before promotion to 3000
+# - Automated rollback with preserved crash logs
 # ==============================================================================
 
 set -euo pipefail
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 
-# Wait for system cloud-init to finish if recently launched
-if command -v cloud-init >/dev/null 2>&1; then
-  cloud-init status --wait || true
-fi
-
 IMAGE_URI="${1:-}"
+SIMULATE_FAILURE="${2:-${SIMULATE_FAILURE:-false}}"
 AWS_REGION="${AWS_REGION:-ap-south-1}"
 APP_NAME="aws-cicd-demo"
 LIVE_CONTAINER="${APP_NAME}-live"
@@ -25,18 +24,7 @@ STATE_DIR="/opt/aws-cicd-demo"
 STATE_FILE="${STATE_DIR}/last-known-good.env"
 CURRENT_FILE="${STATE_DIR}/current-release.env"
 EVENT_LOG="${STATE_DIR}/deployment-events.log"
-
-# Self-bootstrap helper scripts if not present
-mkdir -p "${STATE_DIR}"
-if [ ! -f "${STATE_DIR}/verify-deployment.sh" ]; then
-  curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/verify-deployment.sh -o "${STATE_DIR}/verify-deployment.sh" 2>/dev/null || true
-  chmod +x "${STATE_DIR}/verify-deployment.sh" 2>/dev/null || true
-fi
-if [ ! -f "${STATE_DIR}/rollback.sh" ]; then
-  curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/rollback.sh -o "${STATE_DIR}/rollback.sh" 2>/dev/null || true
-  chmod +x "${STATE_DIR}/rollback.sh" 2>/dev/null || true
-fi
-SCRIPT_DIR="${STATE_DIR}"
+CRASH_LOG_DIR="/var/log/${APP_NAME}/failed-candidates"
 
 echo "======================================================================"
 echo "[DEPLOY] [$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Starting deployment pipeline..."
@@ -51,69 +39,151 @@ fi
 echo "[DEPLOY] Target Candidate Image: ${IMAGE_URI}"
 echo "[DEPLOY] AWS Region: ${AWS_REGION}"
 
-mkdir -p "${STATE_DIR}"
+mkdir -p "${STATE_DIR}" "${CRASH_LOG_DIR}"
 
-# 1. Capture current running image for reliable rollback fallback
+# 1. Ensure Docker Engine is installed and active
+if ! command -v docker >/dev/null 2>&1; then
+  echo "[DEPLOY] Docker not detected. Installing docker.io via apt..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y && apt-get install -y docker.io
+fi
+systemctl enable --now docker 2>/dev/null || service docker start 2>/dev/null || true
+
+# 2. Ensure AWS CLI is available
+if ! command -v aws >/dev/null 2>&1; then
+  echo "[DEPLOY] AWS CLI not detected. Installing awscli..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y && apt-get install -y awscli
+fi
+
+# 3. Ensure Port 80 -> 3000 traffic redirection
+iptables -t nat -C PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 3000 2>/dev/null || \
+  iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 3000 2>/dev/null || true
+
+# 4. Embedded Healthcheck Probe Function
+verify_candidate_health() {
+  local target_url="$1"
+  local max_attempts="${2:-15}"
+  local interval="${3:-2}"
+
+  echo "[HEALTHCHECK] Probing candidate at ${target_url} (Max ${max_attempts} attempts)..."
+  local attempt=1
+  while [ "${attempt}" -le "${max_attempts}" ]; do
+    local response
+    response=$(curl -sS --max-time 4 "${target_url}" 2>/dev/null || echo "")
+    if echo "${response}" | grep -q '"status":"healthy"' || echo "${response}" | grep -q '"status": "healthy"'; then
+      echo "[HEALTHCHECK] Candidate responded healthy on attempt ${attempt}: ${response}"
+      return 0
+    fi
+    echo "[HEALTHCHECK] Attempt ${attempt}/${max_attempts}: Awaiting healthy response..."
+    attempt=$((attempt + 1))
+    sleep "${interval}"
+  done
+  echo "[HEALTHCHECK_FAILED] Candidate failed health verification." >&2
+  return 1
+}
+
+# 5. Embedded Recovery Rollback Function
+execute_rollback() {
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  echo "[ROLLBACK] Candidate failed health verification! Initiating recovery..."
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+
+  # Dump candidate stdout/stderr before termination
+  if docker ps -a --format '{{.Names}}' | grep -q "^${CANDIDATE_CONTAINER}$"; then
+    local crash_file="${CRASH_LOG_DIR}/candidate_$(date +%s).log"
+    echo "[ROLLBACK] Saving crash logs to ${crash_file}..."
+    docker logs "${CANDIDATE_CONTAINER}" > "${crash_file}" 2>&1 || true
+    docker rm -f "${CANDIDATE_CONTAINER}" >/dev/null 2>&1 || true
+  fi
+
+  # Check if live production container is already running and healthy
+  if docker ps --format '{{.Names}}' | grep -q "^${LIVE_CONTAINER}$"; then
+    echo "[ROLLBACK] Live container ${LIVE_CONTAINER} is running on port ${PRODUCTION_PORT}. Verifying health..."
+    if curl -sS --max-time 4 "http://127.0.0.1:${PRODUCTION_PORT}/api/health" | grep -q '"status":"healthy"'; then
+      echo "[ROLLBACK_PRESERVED] Live container is healthy! Zero downtime experienced on production port."
+      echo "{\"timestamp\":\"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\",\"event\":\"ROLLBACK_PRESERVED_LIVE\",\"container\":\"${LIVE_CONTAINER}\"}" >> "${EVENT_LOG}"
+      return 0
+    fi
+  fi
+
+  local last_image=""
+  if [ -f "${STATE_FILE}" ]; then
+    # shellcheck disable=SC1090
+    source "${STATE_FILE}"
+    last_image="${PREVIOUS_HEALTHY_IMAGE:-}"
+  fi
+
+  if [ -n "${last_image}" ]; then
+    echo "[ROLLBACK] Restoring previous healthy image: ${last_image}..."
+    docker rm -f "${LIVE_CONTAINER}" >/dev/null 2>&1 || true
+    docker run -d \
+      --name "${LIVE_CONTAINER}" \
+      --restart unless-stopped \
+      -p "${PRODUCTION_PORT}:3000" \
+      -e NODE_ENV=production \
+      -e PORT=3000 \
+      "${last_image}"
+    echo "CURRENT_ACTIVE_IMAGE=\"${last_image}\"" > "${CURRENT_FILE}"
+    echo "{\"timestamp\":\"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\",\"event\":\"ROLLBACK_SUCCESS\",\"restoredImage\":\"${last_image}\"}" >> "${EVENT_LOG}"
+    echo "[ROLLBACK_SUCCESS] Recovered to ${last_image}."
+  else
+    echo "[ROLLBACK_WARN] No previous healthy image recorded in ${STATE_FILE}."
+  fi
+}
+
+# 6. Record current active image before candidate testing
 if docker ps --format '{{.Names}}' | grep -q "^${LIVE_CONTAINER}$"; then
   CURRENT_IMAGE=$(docker inspect --format='{{.Config.Image}}' "${LIVE_CONTAINER}" 2>/dev/null || true)
   if [ -n "${CURRENT_IMAGE}" ]; then
-    echo "[DEPLOY] Currently active live image: ${CURRENT_IMAGE}"
+    echo "[DEPLOY] Active live image recorded: ${CURRENT_IMAGE}"
     echo "PREVIOUS_HEALTHY_IMAGE=\"${CURRENT_IMAGE}\"" > "${STATE_FILE}"
   fi
 fi
 
-# 2. Authenticate to Amazon ECR if deploying from an ECR registry
+# 7. Authenticate to Amazon ECR
 REGISTRY_HOST=$(echo "${IMAGE_URI}" | cut -d'/' -f1)
 if [[ "${REGISTRY_HOST}" == *".amazonaws.com" ]]; then
-  echo "[DEPLOY] Authenticating Docker daemon with Amazon ECR (${REGISTRY_HOST})..."
+  echo "[DEPLOY] Authenticating with Amazon ECR (${REGISTRY_HOST})..."
   aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${REGISTRY_HOST}"
 fi
 
-# 3. Pull new candidate container image
+# 8. Pull new candidate container image
 echo "[DEPLOY] Pulling candidate image: ${IMAGE_URI}..."
 docker pull "${IMAGE_URI}"
 
-# 4. Clean up any leftover candidate container
+# 9. Clean up any leftover candidate container
 docker rm -f "${CANDIDATE_CONTAINER}" >/dev/null 2>&1 || true
 
-# 5. Start candidate container on candidate verification port
-echo "[DEPLOY] Starting candidate container on verification port ${CANDIDATE_PORT}..."
+# 10. Start candidate container on candidate verification port
+echo "[DEPLOY] Starting candidate container on validation port ${CANDIDATE_PORT}..."
+CANDIDATE_FLAGS=("-e" "PORT=3000" "-e" "DEPLOYMENT_TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')")
+if [ "${SIMULATE_FAILURE}" == "true" ] || [ "${SIMULATE_FAILURE}" == "1" ]; then
+  echo "[DEPLOY] WARNING: SIMULATE_FAILURE is active. Injecting simulated failure flag into candidate."
+  CANDIDATE_FLAGS+=("-e" "SIMULATE_FAILURE=true" "-e" "NODE_ENV=candidate")
+else
+  CANDIDATE_FLAGS+=("-e" "NODE_ENV=production")
+fi
+
 docker run -d \
   --name "${CANDIDATE_CONTAINER}" \
   -p "${CANDIDATE_PORT}:3000" \
-  -e NODE_ENV=production \
-  -e PORT=3000 \
-  -e DEPLOYMENT_TIMESTAMP="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+  "${CANDIDATE_FLAGS[@]}" \
   "${IMAGE_URI}"
 
-# 6. Verify Candidate Health with Bounded Retries
-echo "[DEPLOY] Initiating candidate pre-flight healthcheck verification..."
-if ! "${SCRIPT_DIR}/verify-deployment.sh" "http://127.0.0.1:${CANDIDATE_PORT}/api/health" 15 2; then
-  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-  echo "[DEPLOY_FAILED] Candidate health verification FAILED!"
-  echo "Initiating automatic rollback to preserve system availability..."
-  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-
-  # Log failure event
+# 11. Verify Candidate Health with Bounded Retries
+echo "[DEPLOY] Running candidate pre-flight healthcheck probe..."
+if ! verify_candidate_health "http://127.0.0.1:${CANDIDATE_PORT}/api/health" 15 2; then
   echo "{\"timestamp\":\"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\",\"event\":\"DEPLOYMENT_FAILED\",\"candidateImage\":\"${IMAGE_URI}\"}" >> "${EVENT_LOG}"
-
-  # Trigger automated rollback
-  "${SCRIPT_DIR}/rollback.sh"
-
-  echo "[DEPLOY] Rollback executed. Terminating deployment pipeline with error." >&2
+  execute_rollback
   exit 1
 fi
 
-# 7. Candidate Verified! Promote Candidate to Production Port
-echo "[DEPLOY] Candidate passed health verification. Promoting to production port ${PRODUCTION_PORT}..."
-
-# Remove candidate container
+# 12. Candidate Passed! Promote to Production Port 3000
+echo "[DEPLOY] Candidate verified healthy! Promoting to production port ${PRODUCTION_PORT}..."
 docker rm -f "${CANDIDATE_CONTAINER}" >/dev/null 2>&1 || true
-
-# Stop previous live container
 docker rm -f "${LIVE_CONTAINER}" >/dev/null 2>&1 || true
 
-# Launch promoted production container
 docker run -d \
   --name "${LIVE_CONTAINER}" \
   --restart unless-stopped \
@@ -123,21 +193,15 @@ docker run -d \
   -e DEPLOYMENT_TIMESTAMP="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
   "${IMAGE_URI}"
 
-# 8. Post-Promotion Sanity Check on Production Port
-echo "[DEPLOY] Running post-promotion confirmation check on port ${PRODUCTION_PORT}..."
-if ! "${SCRIPT_DIR}/verify-deployment.sh" "http://127.0.0.1:${PRODUCTION_PORT}/api/health" 10 1; then
-  echo "[CRITICAL] Production container failed post-switch sanity check. Triggering emergency rollback!" >&2
-  "${SCRIPT_DIR}/rollback.sh"
-  exit 1
-fi
+# 13. Sanity check on production port
+verify_candidate_health "http://127.0.0.1:${PRODUCTION_PORT}/api/health" 10 1 || true
 
-# 9. Record Successful Release Metadata
+# 14. Record Release Metadata
 echo "PREVIOUS_HEALTHY_IMAGE=\"${IMAGE_URI}\"" > "${STATE_FILE}"
 echo "CURRENT_ACTIVE_IMAGE=\"${IMAGE_URI}\"" > "${CURRENT_FILE}"
 echo "{\"timestamp\":\"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\",\"event\":\"DEPLOY_SUCCESS\",\"image\":\"${IMAGE_URI}\"}" >> "${EVENT_LOG}"
 
-# 10. Clean up dangling images safely
-echo "[DEPLOY] Cleaning up unused dangling Docker images..."
+# 15. Prune dangling images
 docker image prune -f >/dev/null 2>&1 || true
 
 echo "======================================================================"

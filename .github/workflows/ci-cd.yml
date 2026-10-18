@@ -190,8 +190,8 @@ jobs:
           echo "Target EC2 Instance: ${TARGET_INSTANCE}"
           echo "Deploying Candidate Image: ${IMAGE_URI}"
 
-          # Single robust command to fetch and execute deployment engine
-          DEPLOY_CMD="curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/deploy.sh -o /tmp/deploy.sh && bash /tmp/deploy.sh '${IMAGE_URI}'"
+          # Single robust command to fetch and execute deployment engine with fallback
+          DEPLOY_CMD="(curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/${{ github.sha }}/scripts/deploy.sh -o /tmp/deploy.sh 2>/dev/null || curl -fsSL https://raw.githubusercontent.com/Rahamadulla-boop/aws-cicd-pipeline/main/scripts/deploy.sh -o /tmp/deploy.sh) && bash /tmp/deploy.sh '${IMAGE_URI}' '${SIMULATE_FAILURE}'"
 
           # Send Command via AWS Systems Manager
           COMMAND_ID=$(aws ssm send-command \
